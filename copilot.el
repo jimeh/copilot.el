@@ -53,6 +53,30 @@ Username and password are optional."
   :group 'copilot
   :type '(repeat function))
 
+(defcustom copilot-auto-balance nil
+  "Automatically balance character pairs.
+
+If non-nil, automatically insert a matching closing character
+after point when accepted completion ends with a opening
+character from `copilot-auto-balance-pairs'."
+  :group 'copilot
+  :type 'boolean)
+
+(defvar-local copilot-auto-balance-pairs '(("(" . ")")
+                                           ("[" . "]")
+                                           ("{" . "}")
+                                           ("\"" . "\"")
+                                           ("'" . "'"))
+  "List of pairs of characters to balance.
+
+Applies when `copilot-auto-balance' is non-nil.
+
+Each pair is a cons cell (OPEN . CLOSE) where OPEN is the
+opening character and CLOSE is the closing character.")
+
+(defvar-local copilot--auto-balance-partial nil
+  "Control if auto-balacing should happen on partial completions.")
+
 (defconst copilot--base-dir
   (file-name-directory
    (or load-file-name
@@ -444,13 +468,27 @@ Use TRANSFORM-FN to transform completion if provided."
     (let* ((completion (overlay-get copilot--overlay 'completion))
            (start (overlay-get copilot--overlay 'start))
            (uuid (overlay-get copilot--overlay 'uuid))
-           (t-completion (funcall (or transform-fn #'identity) completion)))
+           (t-completion (funcall (or transform-fn #'identity) completion))
+           (partial (length< t-completion (length completion)))
+           (balance-text (when (and copilot-auto-balance
+                                    (length> t-completion 0)
+                                    (or (not partial)
+                                        copilot--auto-balance-partial))
+                           (cl-loop for (open . close) in copilot-auto-balance-pairs
+                                    when (string-suffix-p open t-completion)
+                                    return close))))
       (copilot--async-request 'notifyAccepted (list :uuid uuid))
       (copilot-clear-overlay)
       (delete-region start (line-end-position))
       (insert t-completion)
+      (when balance-text
+        (save-excursion
+          (let ((start (point)))
+            (insert balance-text)
+            (when (string-match-p "\n" balance-text)
+              (indent-region start (point))))))
       ; trigger completion again if not fully accepted
-      (unless (equal completion t-completion)
+      (when partial
         (copilot-complete))
       t)))
 
@@ -476,14 +514,15 @@ Use TRANSFORM-FN to transform completion if provided."
   "Accept first N-LINE lines of completion."
   (interactive "p")
   (setq n-line (or n-line 1))
-  (copilot-accept-completion (lambda (completion)
-                               (let* ((lines (s-split-up-to (rx anychar (? "\r") "\n") completion n-line))
-                                      (remain (if (<= (length lines) n-line)
-                                                  ""
-                                                (cl-first (last lines))))
-                                      (length (- (length completion) (length remain)))
-                                      (prefix (substring completion 0 length)))
-                                 prefix))))
+  (let ((copilot--auto-balance-partial t))
+    (copilot-accept-completion (lambda (completion)
+                                 (let* ((lines (s-split-up-to (rx anychar (? "\r") "\n") completion n-line))
+                                        (remain (if (<= (length lines) n-line)
+                                                    ""
+                                                  (cl-first (last lines))))
+                                        (length (- (length completion) (length remain)))
+                                        (prefix (substring completion 0 length)))
+                                   prefix)))))
 
 (defun copilot--show-completion (completion)
   "Show COMPLETION."
